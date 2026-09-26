@@ -10,6 +10,10 @@ results come back as compact CSV to keep token use low.
 Auth (first match wins):
   GOOGLE_SERVICE_ACCOUNT_JSON   service-account key as raw JSON or base64
   GOOGLE_APPLICATION_CREDENTIALS  path to a service-account key file
+
+Sheet aliases (first match wins; kept out of the repo because it's public):
+  SHEETS_CONFIG   JSON (or base64 JSON) like sheets.example.json
+  sheets.json     local file next to this script (gitignored)
 """
 from __future__ import annotations
 
@@ -76,14 +80,20 @@ def _call(method: str, path: str, **kw):
 
 
 def _aliases() -> dict:
+    """Sheet aliases from SHEETS_CONFIG (JSON or base64 JSON), else sheets.json."""
+    raw = os.environ.get("SHEETS_CONFIG", "").strip()
     try:
+        if raw:
+            return json.loads(raw if raw.startswith("{") else base64.b64decode(raw))
         return json.loads(ALIASES_FILE.read_text())
     except FileNotFoundError:
         return {}
+    except ValueError as e:
+        raise ToolError(f"Sheet list is not valid JSON: {e}") from e
 
 
 def _sid(spreadsheet: str) -> str:
-    """Accept an alias from sheets.json, a full URL, or a raw spreadsheet ID."""
+    """Accept an alias from the sheet list, a full URL, or a raw spreadsheet ID."""
     a = _aliases().get(spreadsheet.strip().lower())
     if a:
         return a["id"] if isinstance(a, dict) else a
@@ -303,7 +313,7 @@ def cells(spreadsheet: str, range: str, values: list[list] | None = None) -> str
 
 @mcp.tool()
 def list_sheets() -> str:
-    """Spreadsheet aliases configured in sheets.json, with their notes."""
+    """Configured spreadsheet aliases, with their notes."""
     a = _aliases()
     if not a:
         return "No aliases configured; pass a spreadsheet URL or ID instead."

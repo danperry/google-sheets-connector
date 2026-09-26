@@ -1,0 +1,10 @@
+{
+  "shopping": {
+    "id": "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+    "notes": "Family shopping list. One row per item."
+  },
+  "budget": {
+    "id": "PASTE_SPREADSHEET_ID_HERE",
+    "notes": "The ID is the long string between /d/ and /edit in the sheet's URL."
+  }
+}

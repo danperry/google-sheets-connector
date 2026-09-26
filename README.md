@@ -14,7 +14,7 @@ service account whose key lives in the cloud environment.
 | `update` | Set columns on matching rows |
 | `delete` | Delete matching rows |
 | `cells` | Raw A1 read/write, for anything else |
-| `list_sheets` | Aliases from `sheets.json` |
+| `list_sheets` | Your configured sheet aliases |
 
 Tool definitions total about 1.3K tokens.
 
@@ -35,14 +35,19 @@ account email → **Editor**. Turn off "Notify people". It can only see sheets
 shared this way.
 
 ### 3. Register the sheets
-Edit `sheets.json`: one entry per sheet, with the ID from its URL
-(`docs.google.com/spreadsheets/d/<ID>/edit`) and a short note. Optionally add a
-tab named `_notes` to the sheet itself with plain-English rules
-("One row per item; put 'school' in For for school supplies").
+This repo is public, so your sheet list lives in a cloud environment variable,
+not in the repo. Write it like `sheets.example.json`: one entry per sheet,
+with the ID from its URL (`docs.google.com/spreadsheets/d/<ID>/edit`) and a
+short note. You'll paste it as `SHEETS_CONFIG` in step 5. For local use, save
+it as `sheets.json` in this folder instead (it's gitignored).
+
+Optionally add a tab named `_notes` to the sheet itself with plain-English
+rules ("One row per item; put 'school' in For for school supplies").
 
 ### 4. GitHub
-Create a **private** repo (e.g. `sheets-mcp`) and push this folder to it.
-Install the Claude GitHub App on it: <https://github.com/apps/claude>.
+Push this folder to a GitHub repo. Cloud sessions can read public repos
+without the Claude GitHub App; install it (<https://github.com/apps/claude>)
+if you want sessions to push changes.
 
 ### 5. Cloud environment
 At <https://claude.ai/code>, open the environment settings (create one, e.g.
@@ -50,12 +55,14 @@ At <https://claude.ai/code>, open the environment settings (create one, e.g.
 
 ```
 GOOGLE_SERVICE_ACCOUNT_JSON=<base64 of the key file>
+SHEETS_CONFIG=<base64 of your sheet list>
 ```
 
-Get the base64 value (copied to your clipboard) with:
+Get each base64 value (copied to your clipboard) with:
 
 ```bash
 base64 -i ~/Downloads/<key-file>.json | tr -d '\n' | pbcopy
+base64 -i sheets.json | tr -d '\n' | pbcopy
 ```
 
 Note: environment variables are visible to anyone using the environment

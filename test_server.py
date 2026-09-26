@@ -88,6 +88,19 @@ class FakeSheets:
                 line[c0 + j] = str(v)
 
 
+import base64, json, os
+cfg = {"shopping": {"id": SID, "notes": "Family off-island list"}}
+for raw in (json.dumps(cfg), base64.b64encode(json.dumps(cfg).encode()).decode()):
+    os.environ["SHEETS_CONFIG"] = raw
+    assert server._sid("Shopping") == SID
+os.environ["SHEETS_CONFIG"] = "{not json"
+try:
+    server._aliases()
+    raise AssertionError("expected error")
+except ToolError as e:
+    print("error ok:", e)
+del os.environ["SHEETS_CONFIG"]
+
 fake = FakeSheets()
 server._call = fake
 server._aliases = lambda: {"shopping": {"id": SID, "notes": "Family off-island list"}}
