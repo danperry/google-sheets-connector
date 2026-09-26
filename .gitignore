@@ -1,0 +1,8 @@
+# Never commit Google credentials
+*.json.key
+*service-account*.json
+credentials*.json
+key*.json
+.env
+__pycache__/
+.venv/
