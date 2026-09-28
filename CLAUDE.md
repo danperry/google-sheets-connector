@@ -23,6 +23,10 @@ Share it with the service account's email (Editor), then add an alias to the
 its ID (the part of the URL between `/d/` and `/edit`) and a one-line note.
 This repo is public: never commit sheet IDs, notes, or a sheets.json file.
 
+## When something fails
+Check the Troubleshooting table in README.md, quote the exact error, and tell
+the user which fix applies. Don't try to work around a credential error.
+
 ## Never
 - Print, log, or commit the service-account key, `GOOGLE_SERVICE_ACCOUNT_JSON`,
   or `SHEETS_CONFIG`.

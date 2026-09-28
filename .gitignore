@@ -8,3 +8,6 @@ __pycache__/
 .venv/
 # Personal sheet list (use SHEETS_CONFIG in the cloud environment instead)
 sheets.json
+
+# Personal notes for Claude
+CLAUDE.local.md

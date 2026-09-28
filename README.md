@@ -74,6 +74,36 @@ Start a cloud session on this repo in that environment and ask:
 "describe my <alias> sheet". Then create a routine (`/schedule` or
 claude.ai/code → Routines) on this repo and environment.
 
+## Maintenance
+
+- **Add a sheet:** share it with the service account (Editor, no notify), add
+  it to your local `sheets.json`, re-copy it
+  (`base64 -i sheets.json | tr -d '\n' | pbcopy`) and replace `SHEETS_CONFIG`
+  in the cloud environment. Environment changes only affect sessions started
+  afterwards.
+- **Never commit the key or `sheets.json`.** This repo is public; Google scans
+  GitHub and disables leaked keys. `.gitignore` covers the usual names.
+- **Rotate the key** (if leaked, or yearly): Cloud Console → Service Accounts →
+  the account → Keys → add a new JSON key, update `GOOGLE_SERVICE_ACCOUNT_JSON`,
+  then delete the old key there.
+- **Dependencies** are fetched fresh each cloud run (`mcp>=2,<3`). If a new
+  release breaks things, pin an exact version in the header of `server.py`.
+- **Emails from Google Cloud** about the project (policy changes, inactivity)
+  are worth reading; the project is free and has no billing attached.
+
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| No `sheets` tools in the session | Server didn't start: session not in this repo, `.mcp.json` missing, or `uv` unavailable. Run `uv run server.py` locally to see errors. |
+| `No credentials` | `GOOGLE_SERVICE_ACCOUNT_JSON` missing from the environment, or the session uses a different environment. |
+| `MalformedError` / `Incorrect padding` | The pasted key is truncated or has spaces; re-copy with the base64 command. It should be ~3,200 chars starting `ewog`. |
+| `Sheet list is not valid JSON` | Re-copy `SHEETS_CONFIG` from a valid `sheets.json`. |
+| `Sheets API 403/404` | Sheet not shared with the service account, wrong ID, or Sheets API disabled in the project. |
+| `invalid_grant` / `Invalid JWT` | Key was deleted or disabled in Cloud Console; create a new one. |
+| `No column 'X'` / `No tab 'X'` | Someone renamed a header or tab; the error lists the current names. |
+| Edits made in the browser aren't seen | The cell was still being edited; press Enter. |
+
 ## Local testing
 ```bash
 uv run test_server.py                               # offline, fake API
