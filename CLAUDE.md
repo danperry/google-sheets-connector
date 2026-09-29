@@ -1,6 +1,7 @@
 # Sheets helper
 
-This repo provides the `sheets` MCP server (server.py) for editing Google Sheets.
+This repo provides the `sheets` MCP server (server.py) for editing Google Sheets
+and Google Docs.
 Sessions here, including scheduled routines, use it to read and change sheets.
 
 ## How to work with a sheet
@@ -17,7 +18,17 @@ Sessions here, including scheduled routines, use it to read and change sheets.
 5. `spreadsheet` accepts an alias (`list_sheets`), a sheet URL,
    or an ID. Prefer aliases.
 
-## Adding a sheet
+## How to work with a doc
+1. `doc_read` first; pass `section="<heading>"` to read just one part.
+2. Edit with `doc_edit`, which changes text in place and keeps formatting:
+   - change wording: `doc_edit(replace={"old text": "new text"})` (every
+     occurrence; `""` deletes). Make the old text specific enough to hit only
+     what the task means.
+   - add: `doc_edit(insert="line 1\nline 2", after="Heading")` (`~` = contains);
+     omit `after` to add at the end.
+3. Never recreate a doc to change it; its ID and history must stay.
+
+## Adding a sheet or doc
 Share it with the service account's email (Editor), then add an alias to the
 `SHEETS_CONFIG` cloud environment variable (format: sheets.example.json) with
 its ID (the part of the URL between `/d/` and `/edit`) and a one-line note.

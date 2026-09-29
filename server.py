@@ -2,16 +2,17 @@
 # requires-python = ">=3.10"
 # dependencies = ["mcp>=2,<3", "google-auth>=2.20", "requests>=2.31"]
 # ///
-"""Header-aware Google Sheets MCP server.
+"""Header-aware Google Sheets MCP server, plus read/edit for Google Docs.
 
 Rows are addressed by column header names instead of cell positions, and
-results come back as compact CSV to keep token use low.
+results come back as compact CSV to keep token use low. Docs are read as
+plain text with Markdown headings and edited by text, never by index.
 
 Auth (first match wins):
   GOOGLE_SERVICE_ACCOUNT_JSON   service-account key as raw JSON or base64
   GOOGLE_APPLICATION_CREDENTIALS  path to a service-account key file
 
-Sheet aliases (first match wins; kept out of the repo because it's public):
+Aliases for sheets and docs (first match wins; kept out of the repo because it's public):
   SHEETS_CONFIG   JSON (or base64 JSON) like sheets.example.json
   sheets.json     local file next to this script (gitignored)
 """
@@ -30,7 +31,9 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 API = "https://sheets.googleapis.com/v4/spreadsheets"
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+DOCS_API = "https://docs.googleapis.com/v1/documents"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
+          "https://www.googleapis.com/auth/documents"]
 NOTES_TAB = "_notes"
 ALIASES_FILE = Path(__file__).with_name("sheets.json")
 MAX_BULK = 25  # update/delete refuse to touch more rows than this unless all=True
@@ -61,9 +64,9 @@ def _http():
     return _session
 
 
-def _call(method: str, path: str, **kw):
+def _call(method: str, path: str, api: str = API, **kw):
     try:
-        r = _http().request(method, API + path, timeout=30, **kw)
+        r = _http().request(method, api + path, timeout=30, **kw)
     except ToolError:
         raise
     except Exception as e:  # bad key format, auth refresh or network failure
@@ -73,9 +76,10 @@ def _call(method: str, path: str, **kw):
             msg = r.json()["error"]["message"]
         except Exception:
             msg = r.text[:300]
-        if r.status_code in (403, 404):
-            msg += " (is the sheet shared with the service account's email?)"
-        raise ToolError(f"Sheets API {r.status_code}: {msg}")
+        if r.status_code in (403, 404) and "API has not been used" not in msg:
+            msg += " (is it shared with the service account's email?)"
+        name = "Docs API" if api == DOCS_API else "Sheets API"
+        raise ToolError(f"{name} {r.status_code}: {msg}")
     return r.json()
 
 
@@ -93,7 +97,7 @@ def _aliases() -> dict:
 
 
 def _sid(spreadsheet: str) -> str:
-    """Accept an alias from the sheet list, a full URL, or a raw spreadsheet ID."""
+    """Accept an alias from the sheet list, a full URL, or a raw sheet/doc ID."""
     a = _aliases().get(spreadsheet.strip().lower())
     if a:
         return a["id"] if isinstance(a, dict) else a
@@ -155,24 +159,25 @@ def _colidx(headers: list[str], name: str) -> int:
     raise ToolError(f"No column {name!r}. Columns: {', '.join(h for h in headers if h)}")
 
 
+def _hit(text: str, pattern) -> bool:
+    """Case-insensitive exact match, or contains when pattern starts with ~."""
+    text, pattern = text.strip().lower(), str(pattern).strip().lower()
+    return pattern[1:] in text if pattern.startswith("~") else text == pattern
+
+
 def _match(headers, row, where: dict | None) -> bool:
-    if not where:
-        return True
-    for k, v in where.items():
-        cell = row[_colidx(headers, k)].strip().lower()
-        v = str(v).strip().lower()
-        if v.startswith("~"):
-            if v[1:] not in cell:
-                return False
-        elif cell != v:
-            return False
-    return True
+    return all(_hit(row[_colidx(headers, k)], v) for k, v in (where or {}).items())
 
 
 def _csv(rows: list[list]) -> str:
     buf = io.StringIO()
     csv.writer(buf, lineterminator="\n").writerows(rows)
     return buf.getvalue().rstrip("\n")
+
+
+def _alias_note(sid: str) -> str | None:
+    return next((v.get("notes") for v in _aliases().values()
+                 if isinstance(v, dict) and v.get("id") == sid and v.get("notes")), None)
 
 
 def _notes(sid: str, titles: list[str]) -> str:
@@ -192,8 +197,7 @@ def describe(spreadsheet: str, tab: str | None = None, samples: int = 3) -> str:
     meta = _meta(sid)
     titles = [t["title"] for t in meta]
     out = []
-    alias_note = next((v.get("notes") for k, v in _aliases().items()
-                       if isinstance(v, dict) and v.get("id") == sid and v.get("notes")), None)
+    alias_note = _alias_note(sid)
     if alias_note:
         out.append(f"NOTES: {alias_note}")
     n = _notes(sid, titles)
@@ -311,9 +315,159 @@ def cells(spreadsheet: str, range: str, values: list[list] | None = None) -> str
     return f"Wrote {r.get('updatedCells', 0)} cell(s) to {r.get('updatedRange', range)}"
 
 
+# ---------------------------------------------------------------- docs
+
+HEADINGS = {"TITLE": 1, **{f"HEADING_{n}": n for n in range(1, 7)}}
+
+
+def _u16(s: str) -> int:
+    """Length in UTF-16 code units, which is how the Docs API counts indices."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _doc_tab(did: str, tab: str | None):
+    """Return (doc title, all tab titles, the chosen tab)."""
+    d = _call("GET", f"/{did}", api=DOCS_API, params={"includeTabsContent": "true"})
+    tabs, todo = [], list(d.get("tabs", []))
+    while todo:
+        t = todo.pop(0)
+        tabs.append(t)
+        todo[:0] = t.get("childTabs", [])
+    titles = [t["tabProperties"]["title"] for t in tabs]
+    if tab is None:
+        return d.get("title", ""), titles, tabs[0]
+    for t in tabs:
+        if t["tabProperties"]["title"].lower() == tab.strip().lower():
+            return d.get("title", ""), titles, t
+    raise ToolError(f"No tab {tab!r}. Tabs: {', '.join(titles)}")
+
+
+def _para_text(p: dict) -> str:
+    return "".join(e.get("textRun", {}).get("content", "") for e in p["elements"]).rstrip("\n")
+
+
+def _blocks(t: dict) -> list[dict]:
+    """Top-level paragraphs and tables of a tab, with their index range and text."""
+    out = []
+    for el in t["documentTab"]["body"]["content"]:
+        if "paragraph" in el:
+            p = el["paragraph"]
+            text = _para_text(p)
+            level = HEADINGS.get(p.get("paragraphStyle", {}).get("namedStyleType"))
+            if level and text.strip():
+                line = "#" * level + " " + text
+            elif "bullet" in p:
+                line = "  " * p["bullet"].get("nestingLevel", 0) + "- " + text
+            else:
+                line = text
+            out.append({"start": el["startIndex"], "end": el["endIndex"], "text": text,
+                        "level": level if text.strip() else None, "heading": bool(level),
+                        "line": line})
+        elif "table" in el:
+            rows = ["| " + " | ".join(" ".join(_para_text(c["paragraph"])
+                                               for c in cell["content"] if "paragraph" in c)
+                                      for cell in row["tableCells"]) + " |"
+                    for row in el["table"]["tableRows"]]
+            out.append({"start": el["startIndex"], "end": el["endIndex"], "text": "",
+                        "level": None, "heading": False, "line": "\n".join(rows)})
+    return out
+
+
+def _find_block(blocks: list[dict], after: str) -> dict:
+    hits = [b for b in blocks if b["text"] and _hit(b["text"], after)]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        heads = [b["text"] for b in blocks if b["level"]]
+        raise ToolError(f"No paragraph matching {after!r}. Headings: {', '.join(heads) or '(none)'}")
+    raise ToolError(f"{after!r} matches {len(hits)} paragraphs; be more specific: "
+                    + "; ".join(repr(b["text"][:60]) for b in hits[:5]))
+
+
+@mcp.tool()
+def doc_read(document: str, section: str | None = None, tab: str | None = None) -> str:
+    """Read a Google Doc as plain text with Markdown headings (#), bullets (-)
+    and tables (| a | b |). Formatting, images and comments are left out.
+    document: alias (see list_sheets), URL, or ID.
+    section: only the part under this heading (exact, case-insensitive; ~ for
+    contains). tab: which document tab (default: the first)."""
+    did = _sid(document)
+    title, titles, t = _doc_tab(did, tab)
+    blocks = _blocks(t)
+    if section:
+        start = next((i for i, b in enumerate(blocks) if b["level"] and _hit(b["text"], section)), None)
+        if start is None:
+            heads = [b["text"] for b in blocks if b["level"]]
+            raise ToolError(f"No heading matching {section!r}. Headings: {', '.join(heads) or '(none)'}")
+        lvl = blocks[start]["level"]
+        end = next((i for i in range(start + 1, len(blocks))
+                    if blocks[i]["level"] and blocks[i]["level"] <= lvl), len(blocks))
+        blocks = blocks[start:end]
+    head = [f"DOC: {title}"]
+    if len(titles) > 1:
+        head.append(f"TAB: {t['tabProperties']['title']} (tabs: {', '.join(titles)})")
+    note = _alias_note(did)
+    if note:
+        head.append(f"NOTES: {note}")
+    body = re.sub(r"\n{3,}", "\n\n", "\n".join(b["line"] for b in blocks)).strip()
+    return "\n".join(head) + "\n\n" + (body or "(empty)")
+
+
+@mcp.tool()
+def doc_edit(document: str, replace: dict | None = None, insert: str | None = None,
+             after: str | None = None, tab: str | None = None, match_case: bool = False,
+             all: bool = False) -> str:
+    """Change a Google Doc in place; the rest of the doc and its formatting stay put.
+    replace: {"old text": "new text"} replaces every occurrence ("" deletes it).
+      Refuses a phrase that occurs more than 25 times unless all=True.
+    insert: text to add as new paragraph(s); each line becomes a paragraph.
+      Goes right after the paragraph matching `after` (a heading or line; exact,
+      case-insensitive, ~ for contains), or at the end of the doc if omitted.
+      New paragraphs copy that paragraph's style (after a list item they join
+      the list), except after a heading, where they are normal text.
+    tab: which document tab (default: the first)."""
+    if not replace and not (insert or "").strip():
+        raise ToolError("Nothing to do: pass replace and/or insert")
+    did = _sid(document)
+    _, _, t = _doc_tab(did, tab)
+    tid = t["tabProperties"]["tabId"]
+    done = []
+    if replace:
+        text = "\n".join(b["line"] for b in _blocks(t))
+        for old in replace:
+            n = text.count(old) if match_case else text.lower().count(old.lower())
+            if n > MAX_BULK and not all:
+                return f"{old!r} occurs {n} times; pass all=True to replace them all. Nothing changed."
+        reqs = [{"replaceAllText": {"containsText": {"text": old, "matchCase": match_case},
+                                    "replaceText": "" if new is None else str(new),
+                                    "tabsCriteria": {"tabIds": [tid]}}}
+                for old, new in replace.items()]
+        r = _call("POST", f"/{did}:batchUpdate", api=DOCS_API, json={"requests": reqs})
+        for old, rep in zip(replace, r.get("replies", [])):
+            done.append(f"replaced {old!r} x{rep.get('replaceAllText', {}).get('occurrencesChanged', 0)}")
+        if insert:
+            _, _, t = _doc_tab(did, tab)
+    if insert and insert.strip():
+        blocks = _blocks(t)
+        anchor = _find_block(blocks, after) if after else blocks[-1]
+        idx = anchor["end"] - 1  # just before the anchor paragraph's own newline
+        ins = insert.strip("\n")
+        prefix = "" if not after and not anchor["text"] else "\n"
+        reqs = [{"insertText": {"location": {"index": idx, "tabId": tid}, "text": prefix + ins}}]
+        if anchor["heading"]:
+            start = idx + _u16(prefix)
+            reqs.append({"updateParagraphStyle": {
+                "range": {"startIndex": start, "endIndex": start + _u16(ins), "tabId": tid},
+                "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "fields": "namedStyleType"}})
+        _call("POST", f"/{did}:batchUpdate", api=DOCS_API, json={"requests": reqs})
+        where = f"after {anchor['text'][:60]!r}" if after else "at the end"
+        done.append(f"inserted {ins.count(chr(10)) + 1} paragraph(s) {where}")
+    return "Done: " + "; ".join(done)
+
+
 @mcp.tool()
 def list_sheets() -> str:
-    """Configured spreadsheet aliases, with their notes."""
+    """Configured sheet and doc aliases, with their notes."""
     a = _aliases()
     if not a:
         return "No aliases configured; pass a spreadsheet URL or ID instead."

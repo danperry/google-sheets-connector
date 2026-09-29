@@ -2,7 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["mcp>=2,<3", "google-auth>=2.20", "requests>=2.31"]
 # ///
-"""Offline tests: runs every tool against an in-memory fake of the Sheets API.
+"""Offline tests: runs every tool against in-memory fakes of the Sheets and Docs APIs.
 Run with: uv run test_server.py"""
 import re
 from urllib.parse import unquote
@@ -18,6 +18,92 @@ def col_num(letters: str) -> int:
     for ch in letters:
         n = n * 26 + ord(ch) - 64
     return n - 1
+
+
+DID = "doc456"
+
+
+class FakeDocs:
+    """A doc as a list of paragraphs, indexed the way the Docs API does:
+    index 0 is the section break, each paragraph ends with its own newline."""
+
+    def __init__(self):
+        self.paras = [
+            {"text": "Farm plan", "style": "TITLE", "bullet": None},
+            {"text": "Chores", "style": "HEADING_1", "bullet": None},
+            {"text": "Feed hens", "style": "NORMAL_TEXT", "bullet": 0},
+            {"text": "Water beds \U0001F331", "style": "NORMAL_TEXT", "bullet": 0},
+            {"text": "Budget", "style": "HEADING_1", "bullet": None},
+            {"text": "Spend less on hay. Hay is dear.", "style": "NORMAL_TEXT", "bullet": None},
+            {"text": "Later", "style": "HEADING_1", "bullet": None},
+        ]
+        self.calls = []
+
+    def ranges(self):
+        i, out = 1, []
+        for p in self.paras:
+            n = server._u16(p["text"]) + 1
+            out.append((i, i + n))
+            i += n
+        return out
+
+    def get(self):
+        content = [{"startIndex": 0, "endIndex": 1, "sectionBreak": {}}]
+        for p, (a, b) in zip(self.paras, self.ranges()):
+            para = {"elements": [{"textRun": {"content": p["text"] + "\n"}}],
+                    "paragraphStyle": {"namedStyleType": p["style"]}}
+            if p["bullet"] is not None:
+                para["bullet"] = {"nestingLevel": p["bullet"]}
+            content.append({"startIndex": a, "endIndex": b, "paragraph": para})
+        return {"title": "Farm plan", "tabs": [{"tabProperties": {"tabId": "t.0", "title": "Tab 1"},
+                                                  "documentTab": {"body": {"content": content}}}]}
+
+    def insert(self, index, text):
+        for k, (a, b) in enumerate(self.ranges()):
+            if a <= index < b:
+                break
+        p = self.paras[k]
+        units = p["text"].encode("utf-16-le")
+        off = (index - a) * 2
+        full = (units[:off].decode("utf-16-le") + text + units[off:].decode("utf-16-le"))
+        self.paras[k:k + 1] = [dict(p, text=line) for line in full.split("\n")]
+
+    def __call__(self, method, path, **kw):
+        self.calls.append((method, path, kw))
+        if method == "GET" and path == f"/{DID}":
+            assert kw["params"]["includeTabsContent"] == "true"
+            return self.get()
+        assert method == "POST" and path == f"/{DID}:batchUpdate", path
+        replies = []
+        for r in kw["json"]["requests"]:
+            if "replaceAllText" in r:
+                q = r["replaceAllText"]
+                old, new = q["containsText"]["text"], q["replaceText"]
+                assert q["tabsCriteria"]["tabIds"] == ["t.0"]
+                pat = re.compile(re.escape(old), 0 if q["containsText"]["matchCase"] else re.I)
+                n = 0
+                for p in self.paras:
+                    p["text"], k = pat.subn(new, p["text"])
+                    n += k
+                replies.append({"replaceAllText": {"occurrencesChanged": n}})
+            elif "insertText" in r:
+                loc = r["insertText"]["location"]
+                assert loc["tabId"] == "t.0"
+                self.insert(loc["index"], r["insertText"]["text"])
+                replies.append({})
+            elif "updateParagraphStyle" in r:
+                u = r["updateParagraphStyle"]
+                a0, b0 = u["range"]["startIndex"], u["range"]["endIndex"]
+                for p, (a, b) in zip(self.paras, self.ranges()):
+                    if a < b0 and a0 < b:
+                        p["style"] = u["paragraphStyle"]["namedStyleType"]
+                replies.append({})
+            else:
+                raise AssertionError(f"unexpected request {r}")
+        return {"replies": replies}
+
+
+docs = FakeDocs()
 
 
 class FakeSheets:
@@ -39,7 +125,9 @@ class FakeSheets:
         assert m, f"range not quoted: {rng}"
         return m.group(1).replace("''", "'"), m.group(2)
 
-    def __call__(self, method, path, **kw):
+    def __call__(self, method, path, api=server.API, **kw):
+        if api == server.DOCS_API:
+            return docs(method, path, **kw)
         if method == "GET" and path == f"/{SID}":
             return {"sheets": [{"properties": {"sheetId": t["sheetId"], "title": k,
                     "gridProperties": {"rowCount": t["rowCount"], "columnCount": t["columnCount"]}}}
@@ -141,6 +229,52 @@ assert vals()[1][3] == "TRUE"
 
 for bad in (lambda: server.append("shopping", [{"Colour": "x"}]),
             lambda: server.find("shopping", tab="Nope")):
+    try:
+        bad()
+        raise AssertionError("expected error")
+    except ToolError as e:
+        print("error ok:", e)
+
+# ---- docs
+server._aliases = lambda: {"shopping": {"id": SID}, "plan": {"id": DID, "notes": "Farm to-dos"}}
+out = server.doc_read("plan")
+print(out, "\n---")
+assert out.startswith("DOC: Farm plan\nNOTES: Farm to-dos")
+assert "# Chores\n- Feed hens\n- Water beds" in out and "# Budget" in out
+
+out = server.doc_read(f"https://docs.google.com/document/d/{DID}/edit", section="~chore")
+assert "Feed hens" in out and "Budget" not in out
+
+# after a list item: joins the list; emoji before it must not skew indices
+print(server.doc_edit("plan", insert="Fix fence", after="~water beds"))
+assert [p["text"] for p in docs.paras][2:5] == ["Feed hens", "Water beds \U0001F331", "Fix fence"]
+assert docs.paras[4]["bullet"] == 0
+
+# after a heading: normal text, heading itself untouched
+print(server.doc_edit("plan", insert="Hay: $400\nFeed: $120", after="budget"))
+b = docs.paras.index(next(p for p in docs.paras if p["text"] == "Budget"))
+assert [(p["text"], p["style"]) for p in docs.paras[b:b + 3]] == [
+    ("Budget", "HEADING_1"), ("Hay: $400", "NORMAL_TEXT"), ("Feed: $120", "NORMAL_TEXT")]
+
+# at the end, after the last heading
+print(server.doc_edit("plan", insert="Plant garlic"))
+assert (docs.paras[-1]["text"], docs.paras[-1]["style"]) == ("Plant garlic", "NORMAL_TEXT")
+assert docs.paras[-2]["style"] == "HEADING_1"
+
+out = server.doc_edit("plan", replace={"hay": "straw", "nothing here": "x"})
+print(out)
+assert "'hay' x3" in out and "'nothing here' x0" in out and "Spend less on straw. straw is dear." in server.doc_read("plan")
+
+docs.paras.append({"text": "ok " * 30, "style": "NORMAL_TEXT", "bullet": None})
+n = len(docs.calls)
+out = server.doc_edit("plan", replace={"ok": "fine"})
+assert "pass all=True" in out and not any(c[0] == "POST" for c in docs.calls[n:])
+
+for bad in (lambda: server.doc_edit("plan", insert="x", after="~e"),
+            lambda: server.doc_edit("plan", insert="x", after="Nope"),
+            lambda: server.doc_edit("plan"),
+            lambda: server.doc_read("plan", section="Nope"),
+            lambda: server.doc_read("plan", tab="Nope")):
     try:
         bad()
         raise AssertionError("expected error")

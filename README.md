@@ -14,29 +14,32 @@ service account whose key lives in the cloud environment.
 | `update` | Set columns on matching rows |
 | `delete` | Delete matching rows |
 | `cells` | Raw A1 read/write, for anything else |
-| `list_sheets` | Your configured sheet aliases |
+| `doc_read` | A Google Doc (or one section of it) as text with Markdown headings and bullets |
+| `doc_edit` | Replace text in a doc, or insert paragraphs after a heading/line or at the end |
+| `list_sheets` | Your configured sheet and doc aliases |
 
-Tool definitions total about 1.3K tokens.
+Tool definitions total about 2K tokens.
 
 ## Setup
 
 ### 1. Google Cloud (browser, ~15 min)
 1. Go to <https://console.cloud.google.com>, create a project (e.g. "Claude Sheets").
-2. **APIs & Services → Library** → enable **Google Sheets API**.
+2. **APIs & Services → Library** → enable **Google Sheets API** and, to use
+   the doc tools, **Google Docs API**.
 3. **IAM & Admin → Service Accounts → Create service account**. Name it
    (e.g. `claude-sheets`). Skip the optional role/access steps.
 4. Open the new account → **Keys → Add key → Create new key → JSON**. A `.json`
    file downloads. Treat it like a password. Don't put it in this folder.
 5. Copy the service account's email (`claude-sheets@<project>.iam.gserviceaccount.com`).
 
-### 2. Share your sheets
-Open each Google Sheet you want Claude to use → **Share** → paste the service
+### 2. Share your sheets and docs
+Open each Google Sheet or Doc you want Claude to use → **Share** → paste the service
 account email → **Editor**. Turn off "Notify people". It can only see sheets
 shared this way.
 
 ### 3. Register the sheets
 This repo is public, so your sheet list lives in a cloud environment variable,
-not in the repo. Write it like `sheets.example.json`: one entry per sheet,
+not in the repo. Write it like `sheets.example.json`: one entry per sheet or doc,
 with the ID from its URL (`docs.google.com/spreadsheets/d/<ID>/edit`) and a
 short note. You'll paste it as `SHEETS_CONFIG` in step 5. For local use, save
 it as `sheets.json` in this folder instead (it's gitignored).
@@ -76,7 +79,7 @@ claude.ai/code → Routines) on this repo and environment.
 
 ## Maintenance
 
-- **Add a sheet:** share it with the service account (Editor, no notify), add
+- **Add a sheet or doc:** share it with the service account (Editor, no notify), add
   it to your local `sheets.json`, re-copy it
   (`base64 -i sheets.json | tr -d '\n' | pbcopy`) and replace `SHEETS_CONFIG`
   in the cloud environment. Environment changes only affect sessions started
@@ -99,7 +102,7 @@ claude.ai/code → Routines) on this repo and environment.
 | `No credentials` | `GOOGLE_SERVICE_ACCOUNT_JSON` missing from the environment, or the session uses a different environment. |
 | `MalformedError` / `Incorrect padding` | The pasted key is truncated or has spaces; re-copy with the base64 command. It should be ~3,200 chars starting `ewog`. |
 | `Sheet list is not valid JSON` | Re-copy `SHEETS_CONFIG` from a valid `sheets.json`. |
-| `Sheets API 403/404` | Sheet not shared with the service account, wrong ID, or Sheets API disabled in the project. |
+| `Sheets API 403/404` / `Docs API 403/404` | File not shared with the service account, wrong ID, or that API not enabled in the project (the error then says "has not been used in project" and links to the page to enable it). |
 | `invalid_grant` / `Invalid JWT` | Key was deleted or disabled in Cloud Console; create a new one. |
 | `No column 'X'` / `No tab 'X'` | Someone renamed a header or tab; the error lists the current names. |
 | Edits made in the browser aren't seen | The cell was still being edited; press Enter. |
