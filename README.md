@@ -41,8 +41,9 @@ shared this way.
 This repo is public, so your sheet list lives in a cloud environment variable,
 not in the repo. Write it like `sheets.example.json`: one entry per sheet or doc,
 with the ID from its URL (`docs.google.com/spreadsheets/d/<ID>/edit`) and a
-short note. You'll paste it as `SHEETS_CONFIG` in step 5. For local use, save
-it as `sheets.json` in this folder instead (it's gitignored).
+short note. You'll paste it as plain JSON into `SHEETS_CONFIG` in step 5, so
+there's no local file to keep. Keep it on one line, e.g.
+`{"shopping": {"id": "1AbC...", "notes": "Family shopping list."}}`.
 
 Optionally add a tab named `_notes` to the sheet itself with plain-English
 rules ("One row per item; put 'school' in For for school supplies").
@@ -58,15 +59,17 @@ At <https://claude.ai/code>, open the environment settings (create one, e.g.
 
 ```
 GOOGLE_SERVICE_ACCOUNT_JSON=<base64 of the key file>
-SHEETS_CONFIG=<base64 of your sheet list>
+SHEETS_CONFIG=<your sheet list as one-line JSON>
 ```
 
-Get each base64 value (copied to your clipboard) with:
+Get the key's base64 value (copied to your clipboard) with:
 
 ```bash
 base64 -i ~/Downloads/<key-file>.json | tr -d '\n' | pbcopy
-base64 -i sheets.json | tr -d '\n' | pbcopy
 ```
+
+`SHEETS_CONFIG` is pasted as-is; the server treats a value starting with `{`
+as JSON (base64 still works too).
 
 Note: environment variables are visible to anyone using the environment
 (just you on a personal plan) and to Claude inside the session. The key can
@@ -79,12 +82,12 @@ claude.ai/code → Routines) on this repo and environment.
 
 ## Maintenance
 
-- **Add a sheet or doc:** share it with the service account (Editor, no notify), add
-  it to your local `sheets.json`, re-copy it
-  (`base64 -i sheets.json | tr -d '\n' | pbcopy`) and replace `SHEETS_CONFIG`
-  in the cloud environment. Environment changes only affect sessions started
-  afterwards.
-- **Never commit the key or `sheets.json`.** This repo is public; Google scans
+- **Add a sheet or doc:** share it with the service account (Editor, no notify),
+  then edit `SHEETS_CONFIG` in the cloud environment and add an entry
+  (`"alias": {"id": "...", "notes": "..."}`, comma-separated from the others).
+  One bad comma breaks every alias, so check it in a JSON validator if unsure.
+  Environment changes only affect sessions started afterwards.
+- **Never commit the key or sheet IDs.** This repo is public; Google scans
   GitHub and disables leaked keys. `.gitignore` covers the usual names.
 - **Rotate the key** (if leaked, or yearly): Cloud Console → Service Accounts →
   the account → Keys → add a new JSON key, update `GOOGLE_SERVICE_ACCOUNT_JSON`,
@@ -101,7 +104,7 @@ claude.ai/code → Routines) on this repo and environment.
 | No `sheets` tools in the session | Server didn't start: session not in this repo, `.mcp.json` missing, or `uv` unavailable. Run `uv run server.py` locally to see errors. |
 | `No credentials` | `GOOGLE_SERVICE_ACCOUNT_JSON` missing from the environment, or the session uses a different environment. |
 | `MalformedError` / `Incorrect padding` | The pasted key is truncated or has spaces; re-copy with the base64 command. It should be ~3,200 chars starting `ewog`. |
-| `Sheet list is not valid JSON` | Re-copy `SHEETS_CONFIG` from a valid `sheets.json`. |
+| `Sheet list is not valid JSON` | Typo in `SHEETS_CONFIG` (often a missing or extra comma); the error gives the position. Fix it in the environment settings. |
 | `Sheets API 403/404` / `Docs API 403/404` | File not shared with the service account, wrong ID, or that API not enabled in the project (the error then says "has not been used in project" and links to the page to enable it). |
 | `invalid_grant` / `Invalid JWT` | Key was deleted or disabled in Cloud Console; create a new one. |
 | `No column 'X'` / `No tab 'X'` | Someone renamed a header or tab; the error lists the current names. |
@@ -112,3 +115,5 @@ claude.ai/code → Routines) on this repo and environment.
 uv run test_server.py                               # offline, fake API
 GOOGLE_APPLICATION_CREDENTIALS=~/key.json claude    # real, from this folder
 ```
+Locally, export `SHEETS_CONFIG` in your shell, or save the list as
+`sheets.json` in this folder (gitignored; used only when `SHEETS_CONFIG` is unset).
