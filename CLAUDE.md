@@ -30,7 +30,8 @@ Sessions here, including scheduled routines, use it to read and change sheets.
 
 ## Adding a sheet or doc
 Share it with the service account's email (Editor), then add an alias to the
-`SHEETS_CONFIG` cloud environment variable (format: sheets.example.json) with
+`SHEETS_CONFIG` cloud environment variable (plain one-line JSON, format:
+sheets.example.json; the user edits it in the environment settings) with
 its ID (the part of the URL between `/d/` and `/edit`) and a one-line note.
 This repo is public: never commit sheet IDs, notes, or a sheets.json file.
 
