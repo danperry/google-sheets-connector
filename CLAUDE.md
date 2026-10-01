@@ -26,6 +26,10 @@ Sessions here, including scheduled routines, use it to read and change sheets.
      what the task means.
    - add: `doc_edit(insert="line 1\nline 2", after="Heading")` (`~` = contains);
      omit `after` to add at the end.
+   - fill a table (first row = headers): `doc_edit(table="Heading above it",
+     rows=[{"Room": "2", "Tenant name": "..."}])` fills the first empty rows,
+     adding rows if needed; `doc_edit(table=..., where={"Tenant name": "~ana"},
+     set={"Expected rent": "$900"})` changes cells on matching rows.
 3. Never recreate a doc to change it; its ID and history must stay.
 
 ## Adding a sheet or doc
