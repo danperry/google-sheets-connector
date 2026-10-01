@@ -15,7 +15,7 @@ service account whose key lives in the cloud environment.
 | `delete` | Delete matching rows |
 | `cells` | Raw A1 read/write, for anything else |
 | `doc_read` | A Google Doc (or one section of it) as text with Markdown headings and bullets |
-| `doc_edit` | Replace text in a doc, or insert paragraphs after a heading/line or at the end |
+| `doc_edit` | Replace text in a doc, insert paragraphs after a heading/line or at the end, or fill table cells by column header |
 | `list_sheets` | Your configured sheet and doc aliases |
 
 Tool definitions total about 2K tokens.

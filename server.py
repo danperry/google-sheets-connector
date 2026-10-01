@@ -373,6 +373,45 @@ def _blocks(t: dict) -> list[dict]:
     return out
 
 
+def _cell(c: dict) -> dict:
+    """A table cell's text and the index range that holds it (minus the final newline)."""
+    paras = [e for e in c["content"] if "paragraph" in e]
+    return {"text": " ".join(_para_text(e["paragraph"]) for e in paras),
+            "start": c["content"][0]["startIndex"], "end": c["content"][-1]["endIndex"] - 1}
+
+
+def _tables(t: dict) -> list[dict]:
+    """Top-level tables of a tab: header cells, data rows of cells, and the
+    nearest non-empty paragraph above each (usually its heading)."""
+    out, above = [], ""
+    for el in t["documentTab"]["body"]["content"]:
+        if "paragraph" in el:
+            above = _para_text(el["paragraph"]).strip() or above
+        elif "table" in el:
+            rows = [[_cell(c) for c in r["tableCells"]] for r in el["table"]["tableRows"]]
+            out.append({"start": el["startIndex"], "above": above,
+                        "headers": [c["text"].strip() for c in rows[0]], "rows": rows[1:]})
+    return out
+
+
+def _find_table(t: dict, table: str | None) -> dict:
+    tables = _tables(t)
+    if table is None:
+        hits = tables
+    else:
+        hits = [x for x in tables if (x["above"] and _hit(x["above"], table))
+                or any(_hit(h, table) for h in x["headers"])]
+    if len(hits) == 1:
+        return hits[0]
+    names = "; ".join(f"{x['above'][:40]!r} ({', '.join(x['headers'])})" for x in tables)
+    if not tables:
+        raise ToolError("This tab has no tables")
+    if not hits:
+        raise ToolError(f"No table matching {table!r}. Tables: {names}")
+    raise ToolError(f"{len(hits)} tables match; pass table=<heading above it or a "
+                    f"column name> to pick one. Tables: {names}")
+
+
 def _find_block(blocks: list[dict], after: str) -> dict:
     hits = [b for b in blocks if b["text"] and _hit(b["text"], after)]
     if len(hits) == 1:
@@ -416,7 +455,8 @@ def doc_read(document: str, section: str | None = None, tab: str | None = None) 
 @mcp.tool()
 def doc_edit(document: str, replace: dict | None = None, insert: str | None = None,
              after: str | None = None, tab: str | None = None, match_case: bool = False,
-             all: bool = False) -> str:
+             all: bool = False, table: str | None = None, rows: list[dict] | None = None,
+             where: dict | None = None, set: dict | None = None) -> str:
     """Change a Google Doc in place; the rest of the doc and its formatting stay put.
     replace: {"old text": "new text"} replaces every occurrence ("" deletes it).
       Refuses a phrase that occurs more than 25 times unless all=True.
@@ -425,9 +465,19 @@ def doc_edit(document: str, replace: dict | None = None, insert: str | None = No
       case-insensitive, ~ for contains), or at the end of the doc if omitted.
       New paragraphs copy that paragraph's style (after a list item they join
       the list), except after a heading, where they are normal text.
+    Tables, addressed by column header (the table's first row) like a sheet:
+      table: the heading/line just above the table, or one of its column
+        names (~ for contains); may be omitted when the tab has one table.
+      rows: [{"Column": "text"}] fills the first fully empty rows, in order,
+        and adds rows at the bottom when there aren't enough.
+      where + set: set cells on every row matching where (same matching as
+        find), replacing what's in them ("" clears). Refuses more than 25
+        rows unless all=True.
     tab: which document tab (default: the first)."""
-    if not replace and not (insert or "").strip():
-        raise ToolError("Nothing to do: pass replace and/or insert")
+    if not replace and not (insert or "").strip() and not rows and not set:
+        raise ToolError("Nothing to do: pass replace, insert, rows, or where + set")
+    if bool(where) != bool(set):
+        raise ToolError("where and set go together: where picks rows, set gives the new cell text")
     did = _sid(document)
     _, _, t = _doc_tab(did, tab)
     tid = t["tabProperties"]["tabId"]
@@ -445,7 +495,7 @@ def doc_edit(document: str, replace: dict | None = None, insert: str | None = No
         r = _call("POST", f"/{did}:batchUpdate", api=DOCS_API, json={"requests": reqs})
         for old, rep in zip(replace, r.get("replies", [])):
             done.append(f"replaced {old!r} x{rep.get('replaceAllText', {}).get('occurrencesChanged', 0)}")
-        if insert:
+        if insert or rows or set:
             _, _, t = _doc_tab(did, tab)
     if insert and insert.strip():
         blocks = _blocks(t)
@@ -460,9 +510,59 @@ def doc_edit(document: str, replace: dict | None = None, insert: str | None = No
                 "range": {"startIndex": start, "endIndex": start + _u16(ins), "tabId": tid},
                 "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "fields": "namedStyleType"}})
         _call("POST", f"/{did}:batchUpdate", api=DOCS_API, json={"requests": reqs})
-        where = f"after {anchor['text'][:60]!r}" if after else "at the end"
-        done.append(f"inserted {ins.count(chr(10)) + 1} paragraph(s) {where}")
+        spot = f"after {anchor['text'][:60]!r}" if after else "at the end"
+        done.append(f"inserted {ins.count(chr(10)) + 1} paragraph(s) {spot}")
+        if rows or set:
+            _, _, t = _doc_tab(did, tab)
+    if rows or set:
+        done.append(_fill_table(did, tab, tid, t, table, rows, where, set, force=all))
     return "Done: " + "; ".join(done)
+
+
+def _fill_table(did, tab, tid, t, table, rows, where, set, force) -> str:
+    x = _find_table(t, table)
+    heads = x["headers"]
+    for k in [k for r in rows or [] for k in r] + list(set or {}) + list(where or {}):
+        _colidx(heads, k)  # unknown column: fail before changing anything
+    writes, touched = [], []
+    if set:
+        hits = [n for n, r in enumerate(x["rows"])
+                if all(_hit(r[_colidx(heads, k)]["text"], v) for k, v in where.items())]
+        if not hits and not rows:
+            return "0 table rows matched; nothing changed"
+        if len(hits) > MAX_BULK and not force:
+            return f"{len(hits)} table rows match; pass all=True to change them all. Nothing changed."
+        writes += [(x["rows"][n][_colidx(heads, k)], v) for n in hits for k, v in set.items()]
+        touched += hits
+    if rows:
+        blank = [n for n, r in enumerate(x["rows"]) if not any(c["text"].strip() for c in r)]
+        if len(rows) > len(blank):
+            loc = {"tableStartLocation": {"index": x["start"], "tabId": tid},
+                   "rowIndex": len(x["rows"]), "columnIndex": 0}
+            _call("POST", f"/{did}:batchUpdate", api=DOCS_API, json={"requests": [
+                {"insertTableRow": {"tableCellLocation": loc, "insertBelow": True}}
+                for _ in range(len(rows) - len(blank))]})
+            _, _, t = _doc_tab(did, tab)
+            x = next(y for y in _tables(t) if y["start"] == x["start"])
+            if set:  # re-read cells from the refreshed table
+                writes = [(x["rows"][n][_colidx(heads, k)], v) for n in touched for k, v in set.items()]
+            blank = [n for n, r in enumerate(x["rows"]) if not any(c["text"].strip() for c in r)]
+        for n, r in zip(blank, rows):
+            writes += [(x["rows"][n][_colidx(heads, k)], v) for k, v in r.items()]
+            touched.append(n)
+    reqs = []
+    for c, v in sorted(writes, key=lambda w: w[0]["start"], reverse=True):
+        if c["end"] > c["start"]:
+            reqs.append({"deleteContentRange": {"range": {
+                "startIndex": c["start"], "endIndex": c["end"], "tabId": tid}}})
+        if v not in (None, ""):
+            reqs.append({"insertText": {"location": {"index": c["start"], "tabId": tid},
+                                        "text": str(v)}})
+    if reqs:
+        _call("POST", f"/{did}:batchUpdate", api=DOCS_API, json={"requests": reqs})
+    name = x["above"][:60] or ", ".join(heads)
+    return (f"wrote {len(writes)} cell(s) in table {name!r}, row(s) "
+            + ", ".join(str(n + 1) for n in sorted(dict.fromkeys(touched))))
 
 
 @mcp.tool()

@@ -24,11 +24,13 @@ DID = "doc456"
 
 
 class FakeDocs:
-    """A doc as a list of paragraphs, indexed the way the Docs API does:
-    index 0 is the section break, each paragraph ends with its own newline."""
+    """A doc as a list of paragraphs and tables, indexed the way the Docs API does:
+    index 0 is the section break, each paragraph ends with its own newline, and a
+    table, each of its rows and each cell take one index before their content,
+    plus one at the table's end. A table is {"table": [[[cell paragraph texts]]]}."""
 
-    def __init__(self):
-        self.paras = [
+    def __init__(self, paras=None):
+        self.paras = paras or [
             {"text": "Farm plan", "style": "TITLE", "bullet": None},
             {"text": "Chores", "style": "HEADING_1", "bullet": None},
             {"text": "Feed hens", "style": "NORMAL_TEXT", "bullet": 0},
@@ -39,34 +41,63 @@ class FakeDocs:
         ]
         self.calls = []
 
-    def ranges(self):
-        i, out = 1, []
-        for p in self.paras:
+    def layout(self):
+        """(API body content, every paragraph as (start, end, its list, its position))."""
+        content, slots, i = [{"startIndex": 0, "endIndex": 1, "sectionBreak": {}}], [], 1
+
+        def para(p, lst, k):
+            nonlocal i
             n = server._u16(p["text"]) + 1
-            out.append((i, i + n))
+            el = {"startIndex": i, "endIndex": i + n, "paragraph": {
+                "elements": [{"textRun": {"content": p["text"] + "\n"}}],
+                "paragraphStyle": {"namedStyleType": p.get("style", "NORMAL_TEXT")}}}
+            if p.get("bullet") is not None:
+                el["paragraph"]["bullet"] = {"nestingLevel": p["bullet"]}
+            slots.append((i, i + n, lst, k))
             i += n
-        return out
+            return el
+
+        for k, p in enumerate(self.paras):
+            if "table" not in p:
+                content.append(para(p, self.paras, k))
+                continue
+            t0, rows = i, []
+            i += 1
+            for row in p["table"]:
+                r0, cells = i, []
+                i += 1
+                for cell in row:
+                    c0 = i
+                    i += 1
+                    cc = [para(q, cell, j) for j, q in enumerate(cell)]
+                    cells.append({"startIndex": c0, "endIndex": i, "content": cc})
+                rows.append({"startIndex": r0, "endIndex": i, "tableCells": cells})
+            i += 1
+            content.append({"startIndex": t0, "endIndex": i, "table": {"tableRows": rows}})
+        return content, slots
 
     def get(self):
-        content = [{"startIndex": 0, "endIndex": 1, "sectionBreak": {}}]
-        for p, (a, b) in zip(self.paras, self.ranges()):
-            para = {"elements": [{"textRun": {"content": p["text"] + "\n"}}],
-                    "paragraphStyle": {"namedStyleType": p["style"]}}
-            if p["bullet"] is not None:
-                para["bullet"] = {"nestingLevel": p["bullet"]}
-            content.append({"startIndex": a, "endIndex": b, "paragraph": para})
         return {"title": "Farm plan", "tabs": [{"tabProperties": {"tabId": "t.0", "title": "Tab 1"},
-                                                  "documentTab": {"body": {"content": content}}}]}
+                "documentTab": {"body": {"content": self.layout()[0]}}}]}
 
     def insert(self, index, text):
-        for k, (a, b) in enumerate(self.ranges()):
-            if a <= index < b:
-                break
-        p = self.paras[k]
+        a, _, lst, k = next(s for s in self.layout()[1] if s[0] <= index < s[1])
+        p = lst[k]
         units = p["text"].encode("utf-16-le")
         off = (index - a) * 2
         full = (units[:off].decode("utf-16-le") + text + units[off:].decode("utf-16-le"))
-        self.paras[k:k + 1] = [dict(p, text=line) for line in full.split("\n")]
+        lst[k:k + 1] = [dict(p, text=line) for line in full.split("\n")]
+
+    def delete(self, a0, b0):
+        """Delete within one list of paragraphs (one cell, in practice); keeps its last newline."""
+        hit = [s for s in self.layout()[1] if s[0] < b0 and a0 < s[1]]
+        lst = hit[0][2]
+        assert all(s[2] is lst for s in hit), "delete spans containers"
+        base = next(s[0] for s in self.layout()[1] if s[2] is lst and s[3] == 0)
+        units = "\n".join(p["text"] for p in lst).encode("utf-16-le")
+        assert b0 - base <= len(units) // 2, "would delete the cell's last newline"
+        full = (units[:(a0 - base) * 2] + units[(b0 - base) * 2:]).decode("utf-16-le")
+        lst[:] = [dict(lst[0], text=line) for line in full.split("\n")]
 
     def __call__(self, method, path, **kw):
         self.calls.append((method, path, kw))
@@ -82,21 +113,34 @@ class FakeDocs:
                 assert q["tabsCriteria"]["tabIds"] == ["t.0"]
                 pat = re.compile(re.escape(old), 0 if q["containsText"]["matchCase"] else re.I)
                 n = 0
-                for p in self.paras:
-                    p["text"], k = pat.subn(new, p["text"])
-                    n += k
+                for _, _, lst, k in self.layout()[1]:
+                    lst[k]["text"], m = pat.subn(new, lst[k]["text"])
+                    n += m
                 replies.append({"replaceAllText": {"occurrencesChanged": n}})
             elif "insertText" in r:
                 loc = r["insertText"]["location"]
                 assert loc["tabId"] == "t.0"
                 self.insert(loc["index"], r["insertText"]["text"])
                 replies.append({})
+            elif "deleteContentRange" in r:
+                rng = r["deleteContentRange"]["range"]
+                assert rng["tabId"] == "t.0"
+                self.delete(rng["startIndex"], rng["endIndex"])
+                replies.append({})
+            elif "insertTableRow" in r:
+                loc = r["insertTableRow"]["tableCellLocation"]
+                assert loc["tableStartLocation"]["tabId"] == "t.0" and r["insertTableRow"]["insertBelow"]
+                content = self.layout()[0]
+                k = next(k for k, el in enumerate(content[1:]) if el["startIndex"] == loc["tableStartLocation"]["index"])
+                tbl = self.paras[k]["table"]
+                tbl.insert(loc["rowIndex"] + 1, [[{"text": ""}] for _ in tbl[0]])
+                replies.append({})
             elif "updateParagraphStyle" in r:
                 u = r["updateParagraphStyle"]
                 a0, b0 = u["range"]["startIndex"], u["range"]["endIndex"]
-                for p, (a, b) in zip(self.paras, self.ranges()):
+                for a, b, lst, k in self.layout()[1]:
                     if a < b0 and a0 < b:
-                        p["style"] = u["paragraphStyle"]["namedStyleType"]
+                        lst[k]["style"] = u["paragraphStyle"]["namedStyleType"]
                 replies.append({})
             else:
                 raise AssertionError(f"unexpected request {r}")
@@ -280,6 +324,64 @@ for bad in (lambda: server.doc_edit("plan", insert="x", after="~e"),
         raise AssertionError("expected error")
     except ToolError as e:
         print("error ok:", e)
+
+# ---- doc tables
+def cell(*lines):
+    return [{"text": t} for t in lines]
+
+
+docs = FakeDocs([
+    {"text": "Rules", "style": "TITLE", "bullet": None},
+    {"text": "Tenant Directory \u2013 house", "style": "HEADING_2", "bullet": None},
+    {"table": [[cell("Room"), cell("Tenant name"), cell("Expected rent")],
+               [cell("1"), cell("Ana \U0001F3E0"), cell("")],
+               [cell(""), cell(""), cell("")],
+               [cell(""), cell(""), cell("")]]},
+    {"text": "", "style": "NORMAL_TEXT", "bullet": None},
+    {"text": "Pets", "style": "HEADING_2", "bullet": None},
+    {"table": [[cell("Pet"), cell("Owner")], [cell("Rex"), cell("Ana")]]},
+    {"text": "Run Notes", "style": "HEADING_2", "bullet": None},
+])
+rows_of = lambda k: [[" ".join(p["text"] for p in c) for c in r] for r in docs.paras[k]["table"]]
+
+# fill an empty cell on a matched row; emoji before it must not skew indices
+print(server.doc_edit("plan", table="~tenant directory", where={"Tenant name": "~ana"},
+                      set={"Expected rent": "$900"}))
+assert rows_of(2)[1] == ["1", "Ana \U0001F3E0", "$900"]
+
+# rows fill the empty rows first, then add rows at the bottom
+out = server.doc_edit("plan", table="Expected rent", rows=[
+    {"Room": "2", "Tenant name": "Bo", "Expected rent": "$800"},
+    {"Room": "3", "Tenant name": "Cy"},
+    {"Room": "4", "Tenant name": "Di\nand Ed", "Expected rent": "$1,000"}])
+print(out)
+assert rows_of(2)[1:] == [["1", "Ana \U0001F3E0", "$900"], ["2", "Bo", "$800"], ["3", "Cy", ""],
+                          ["4", "Di and Ed", "$1,000"]], rows_of(2)
+assert "row(s) 2, 3, 4" in out
+assert rows_of(5) == [["Pet", "Owner"], ["Rex", "Ana"]]  # other table untouched
+assert docs.paras[6]["text"] == "Run Notes"
+
+# set replaces existing text, and "" clears a cell
+server.doc_edit("plan", table="~tenant", where={"Room": "2"}, set={"Expected rent": "$850", "Room": ""})
+assert rows_of(2)[2] == ["", "Bo", "$850"]
+out = server.doc_read("plan", section="~tenant")
+assert "| Room | Tenant name | Expected rent |" in out and "|  | Bo | $850 |" in out, out
+
+n = len(docs.calls)
+assert "0 table rows matched" in server.doc_edit("plan", table="Pet", where={"Pet": "Cat"}, set={"Owner": "x"})
+assert not any(c[0] == "POST" for c in docs.calls[n:])
+
+for bad in (lambda: server.doc_edit("plan", where={"Pet": "Rex"}, set={"Owner": "x"}),  # 2 tables
+            lambda: server.doc_edit("plan", table="Nope", rows=[{"Pet": "x"}]),
+            lambda: server.doc_edit("plan", table="Pet", rows=[{"Colour": "x"}]),
+            lambda: server.doc_edit("plan", table="Pet", set={"Owner": "x"})):
+    n = len(docs.calls)
+    try:
+        bad()
+        raise AssertionError("expected error")
+    except ToolError as e:
+        print("error ok:", e)
+    assert not any(c[0] == "POST" for c in docs.calls[n:])
 
 assert server._col(0) == "A" and server._col(25) == "Z" and server._col(26) == "AA"
 assert server._q("Dan's list") == "'Dan''s list'"
