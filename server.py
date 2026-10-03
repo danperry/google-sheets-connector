@@ -373,6 +373,38 @@ def _blocks(t: dict) -> list[dict]:
     return out
 
 
+URL = re.compile(r"https?://[^\s<>\"]+")
+
+
+def _paras(content: list[dict]):
+    """Every paragraph in body content, including those inside table cells."""
+    for el in content:
+        if "paragraph" in el:
+            yield el["paragraph"]
+        for row in el.get("table", {}).get("tableRows", []):
+            for c in row["tableCells"]:
+                yield from _paras(c["content"])
+
+
+def _link_urls(did: str, tid: str, t: dict) -> int:
+    """Make every bare http(s) URL in the tab a clickable link; returns how many."""
+    reqs = []
+    for p in _paras(t["documentTab"]["body"]["content"]):
+        for e in p["elements"]:
+            run = e.get("textRun")
+            if not run or run.get("textStyle", {}).get("link"):
+                continue
+            for m in URL.finditer(run["content"]):
+                url = m.group().rstrip(".,;:!?'\")]")
+                start = e["startIndex"] + _u16(run["content"][:m.start()])
+                reqs.append({"updateTextStyle": {
+                    "range": {"startIndex": start, "endIndex": start + _u16(url), "tabId": tid},
+                    "textStyle": {"link": {"url": url}}, "fields": "link"}})
+    if reqs:
+        _call("POST", f"/{did}:batchUpdate", api=DOCS_API, json={"requests": reqs})
+    return len(reqs)
+
+
 def _cell(c: dict) -> dict:
     """A table cell's text and the index range that holds it (minus the final newline)."""
     paras = [e for e in c["content"] if "paragraph" in e]
@@ -473,7 +505,8 @@ def doc_edit(document: str, replace: dict | None = None, insert: str | None = No
       where + set: set cells on every row matching where (same matching as
         find), replacing what's in them ("" clears). Refuses more than 25
         rows unless all=True.
-    tab: which document tab (default: the first)."""
+    tab: which document tab (default: the first).
+    Afterwards every bare http(s) URL in the tab is made a clickable link."""
     if not replace and not (insert or "").strip() and not rows and not set:
         raise ToolError("Nothing to do: pass replace, insert, rows, or where + set")
     if bool(where) != bool(set):
@@ -516,6 +549,9 @@ def doc_edit(document: str, replace: dict | None = None, insert: str | None = No
             _, _, t = _doc_tab(did, tab)
     if rows or set:
         done.append(_fill_table(did, tab, tid, t, table, rows, where, set, force=all))
+    n = _link_urls(did, tid, _doc_tab(did, tab)[2])
+    if n:
+        done.append(f"linked {n} URL(s)")
     return "Done: " + "; ".join(done)
 
 
