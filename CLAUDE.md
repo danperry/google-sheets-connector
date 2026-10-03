@@ -30,7 +30,8 @@ Sessions here, including scheduled routines, use it to read and change sheets.
      rows=[{"Room": "2", "Tenant name": "..."}])` fills the first empty rows,
      adding rows if needed; `doc_edit(table=..., where={"Tenant name": "~ana"},
      set={"Expected rent": "$900"})` changes cells on matching rows.
-3. Never recreate a doc to change it; its ID and history must stay.
+3. Bare `http(s)://` URLs in the doc become clickable links after any `doc_edit`.
+4. Never recreate a doc to change it; its ID and history must stay.
 
 ## Adding a sheet or doc
 Share it with the service account's email (Editor), then add an alias to the
