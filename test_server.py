@@ -49,7 +49,7 @@ class FakeDocs:
             nonlocal i
             n = server._u16(p["text"]) + 1
             el = {"startIndex": i, "endIndex": i + n, "paragraph": {
-                "elements": [{"textRun": {"content": p["text"] + "\n"}}],
+                "elements": self.runs(p, i),
                 "paragraphStyle": {"namedStyleType": p.get("style", "NORMAL_TEXT")}}}
             if p.get("bullet") is not None:
                 el["paragraph"]["bullet"] = {"nestingLevel": p["bullet"]}
@@ -75,6 +75,19 @@ class FakeDocs:
             i += 1
             content.append({"startIndex": t0, "endIndex": i, "table": {"tableRows": rows}})
         return content, slots
+
+    def runs(self, p, i):
+        """Text runs of a paragraph starting at index i, split where links begin and end."""
+        units, links = (p["text"] + "\n").encode("utf-16-le"), sorted(p.get("links", []))
+        cuts = sorted({0, len(units) // 2, *(x for a, b, _ in links for x in (a, b))})
+        out = []
+        for a, b in zip(cuts, cuts[1:]):
+            run = {"content": units[a * 2:b * 2].decode("utf-16-le")}
+            url = next((u for la, lb, u in links if la <= a and b <= lb), None)
+            if url:
+                run["textStyle"] = {"link": {"url": url}}
+            out.append({"startIndex": i + a, "endIndex": i + b, "textRun": run})
+        return out
 
     def get(self):
         return {"title": "Farm plan", "tabs": [{"tabProperties": {"tabId": "t.0", "title": "Tab 1"},
@@ -126,6 +139,15 @@ class FakeDocs:
                 rng = r["deleteContentRange"]["range"]
                 assert rng["tabId"] == "t.0"
                 self.delete(rng["startIndex"], rng["endIndex"])
+                replies.append({})
+            elif "updateTextStyle" in r:
+                q = r["updateTextStyle"]
+                rng = q["range"]
+                assert rng["tabId"] == "t.0" and q["fields"] == "link"
+                a, b, lst, k = next(s for s in self.layout()[1] if s[0] <= rng["startIndex"] < s[1])
+                assert rng["endIndex"] < b, "link runs past its paragraph"
+                lst[k].setdefault("links", []).append(
+                    (rng["startIndex"] - a, rng["endIndex"] - a, q["textStyle"]["link"]["url"]))
                 replies.append({})
             elif "insertTableRow" in r:
                 loc = r["insertTableRow"]["tableCellLocation"]
@@ -382,6 +404,21 @@ for bad in (lambda: server.doc_edit("plan", where={"Pet": "Rex"}, set={"Owner": 
     except ToolError as e:
         print("error ok:", e)
     assert not any(c[0] == "POST" for c in docs.calls[n:])
+
+# bare URLs become links (after an emoji, in a table cell too); linked ones are left alone
+out = server.doc_edit("plan", insert="Unsubscribe \U0001F4E7: https://ex.com/u?id=1&t=2. Or https://mail.google.com/mail/u/0/#all/19f",
+                      after="Run Notes")
+print(out)
+assert "linked 2 URL(s)" in out
+p = next(p for p in docs.paras if p.get("text", "").startswith("Unsubscribe"))
+got = [(p["text"].encode("utf-16-le")[a * 2:b * 2].decode("utf-16-le"), u) for a, b, u in p["links"]]
+assert got == [("https://ex.com/u?id=1&t=2", "https://ex.com/u?id=1&t=2"),
+               ("https://mail.google.com/mail/u/0/#all/19f", "https://mail.google.com/mail/u/0/#all/19f")], got
+out = server.doc_edit("plan", table="Pet", where={"Pet": "Rex"}, set={"Owner": "see http://ana.example"})
+assert "linked 1 URL(s)" in out, out
+n = len(docs.calls)
+assert "linked" not in server.doc_edit("plan", replace={"Feed hens": "Feed the hens"})
+assert len(docs.calls) - n == 3  # GET, replace, GET: nothing left to link
 
 assert server._col(0) == "A" and server._col(25) == "Z" and server._col(26) == "AA"
 assert server._q("Dan's list") == "'Dan''s list'"
