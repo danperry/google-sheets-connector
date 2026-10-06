@@ -346,6 +346,17 @@ def _para_text(p: dict) -> str:
     return "".join(e.get("textRun", {}).get("content", "") for e in p["elements"]).rstrip("\n")
 
 
+def _para_md(p: dict) -> str:
+    """Paragraph text with linked words shown as [words](url), so readers keep the URL."""
+    out = []
+    for e in p["elements"]:
+        run = e.get("textRun", {})
+        text, url = run.get("content", ""), run.get("textStyle", {}).get("link", {}).get("url")
+        body = text.rstrip("\n")
+        out.append(f"[{body}]({url})" + text[len(body):] if url and body and body != url else text)
+    return "".join(out).rstrip("\n")
+
+
 def _blocks(t: dict) -> list[dict]:
     """Top-level paragraphs and tables of a tab, with their index range and text."""
     out = []
@@ -355,25 +366,27 @@ def _blocks(t: dict) -> list[dict]:
             text = _para_text(p)
             level = HEADINGS.get(p.get("paragraphStyle", {}).get("namedStyleType"))
             if level and text.strip():
-                line = "#" * level + " " + text
+                mark = "#" * level + " "
             elif "bullet" in p:
-                line = "  " * p["bullet"].get("nestingLevel", 0) + "- " + text
+                mark = "  " * p["bullet"].get("nestingLevel", 0) + "- "
             else:
-                line = text
+                mark = ""
             out.append({"start": el["startIndex"], "end": el["endIndex"], "text": text,
                         "level": level if text.strip() else None, "heading": bool(level),
-                        "line": line})
+                        "line": mark + text, "shown": mark + _para_md(p)})
         elif "table" in el:
             rows = ["| " + " | ".join(" ".join(_para_text(c["paragraph"])
                                                for c in cell["content"] if "paragraph" in c)
                                       for cell in row["tableCells"]) + " |"
                     for row in el["table"]["tableRows"]]
             out.append({"start": el["startIndex"], "end": el["endIndex"], "text": "",
-                        "level": None, "heading": False, "line": "\n".join(rows)})
+                        "level": None, "heading": False, "line": "\n".join(rows),
+                        "shown": "\n".join(rows)})
     return out
 
 
 URL = re.compile(r"https?://[^\s<>\"]+")
+MD_LINK = re.compile(r"\[([^\[\]\n]+)\]\((https?://[^\s()]+)\)")
 
 
 def _paras(content: list[dict]):
@@ -403,6 +416,27 @@ def _link_urls(did: str, tid: str, t: dict) -> int:
     if reqs:
         _call("POST", f"/{did}:batchUpdate", api=DOCS_API, json={"requests": reqs})
     return len(reqs)
+
+
+def _md_links(did: str, tid: str, t: dict) -> int:
+    """Turn every [words](url) in the tab into the words, linked to url; returns how many."""
+    found = []
+    for p in _paras(t["documentTab"]["body"]["content"]):
+        for e in p["elements"]:
+            run = e.get("textRun")
+            for m in MD_LINK.finditer(run["content"] if run else ""):
+                start = e["startIndex"] + _u16(run["content"][:m.start()])
+                found.append((start, start + _u16(m.group()), m.group(1), m.group(2)))
+    reqs = []
+    for a, b, words, url in sorted(found, reverse=True):  # from the end, so indices stay valid
+        rng = {"startIndex": a, "endIndex": a + _u16(words), "tabId": tid}
+        reqs += [{"deleteContentRange": {"range": {"startIndex": a, "endIndex": b, "tabId": tid}}},
+                 {"insertText": {"location": {"index": a, "tabId": tid}, "text": words}},
+                 {"updateTextStyle": {"range": rng, "textStyle": {"link": {"url": url}},
+                                      "fields": "link"}}]
+    if reqs:
+        _call("POST", f"/{did}:batchUpdate", api=DOCS_API, json={"requests": reqs})
+    return len(found)
 
 
 def _cell(c: dict) -> dict:
@@ -458,7 +492,8 @@ def _find_block(blocks: list[dict], after: str) -> dict:
 @mcp.tool()
 def doc_read(document: str, section: str | None = None, tab: str | None = None) -> str:
     """Read a Google Doc as plain text with Markdown headings (#), bullets (-)
-    and tables (| a | b |). Formatting, images and comments are left out.
+    and tables (| a | b |). Linked words show as [words](url). Formatting,
+    images and comments are left out.
     document: alias (see list_sheets), URL, or ID.
     section: only the part under this heading (exact, case-insensitive; ~ for
     contains). tab: which document tab (default: the first)."""
@@ -480,7 +515,7 @@ def doc_read(document: str, section: str | None = None, tab: str | None = None) 
     note = _alias_note(did)
     if note:
         head.append(f"NOTES: {note}")
-    body = re.sub(r"\n{3,}", "\n\n", "\n".join(b["line"] for b in blocks)).strip()
+    body = re.sub(r"\n{3,}", "\n\n", "\n".join(b["shown"] for b in blocks)).strip()
     return "\n".join(head) + "\n\n" + (body or "(empty)")
 
 
@@ -491,7 +526,8 @@ def doc_edit(document: str, replace: dict | None = None, insert: str | None = No
              where: dict | None = None, set: dict | None = None) -> str:
     """Change a Google Doc in place; the rest of the doc and its formatting stay put.
     replace: {"old text": "new text"} replaces every occurrence ("" deletes it).
-      Refuses a phrase that occurs more than 25 times unless all=True.
+      Refuses a phrase that occurs more than 25 times unless all=True. In the
+      old text, [words](url) as doc_read shows it matches the linked words.
     insert: text to add as new paragraph(s); each line becomes a paragraph.
       Goes right after the paragraph matching `after` (a heading or line; exact,
       case-insensitive, ~ for contains), or at the end of the doc if omitted.
@@ -506,7 +542,8 @@ def doc_edit(document: str, replace: dict | None = None, insert: str | None = No
         find), replacing what's in them ("" clears). Refuses more than 25
         rows unless all=True.
     tab: which document tab (default: the first).
-    Afterwards every bare http(s) URL in the tab is made a clickable link."""
+    Afterwards [words](url) anywhere in the tab becomes "words" linked to url,
+    and every other bare http(s) URL in the tab is made a clickable link."""
     if not replace and not (insert or "").strip() and not rows and not set:
         raise ToolError("Nothing to do: pass replace, insert, rows, or where + set")
     if bool(where) != bool(set):
@@ -516,6 +553,7 @@ def doc_edit(document: str, replace: dict | None = None, insert: str | None = No
     tid = t["tabProperties"]["tabId"]
     done = []
     if replace:
+        replace = {MD_LINK.sub(r"\1", old): new for old, new in replace.items()}
         text = "\n".join(b["line"] for b in _blocks(t))
         for old in replace:
             n = text.count(old) if match_case else text.lower().count(old.lower())
@@ -549,7 +587,12 @@ def doc_edit(document: str, replace: dict | None = None, insert: str | None = No
             _, _, t = _doc_tab(did, tab)
     if rows or set:
         done.append(_fill_table(did, tab, tid, t, table, rows, where, set, force=all))
-    n = _link_urls(did, tid, _doc_tab(did, tab)[2])
+    t = _doc_tab(did, tab)[2]
+    n = _md_links(did, tid, t)
+    if n:
+        done.append(f"linked {n} word(s)")
+        t = _doc_tab(did, tab)[2]
+    n = _link_urls(did, tid, t)
     if n:
         done.append(f"linked {n} URL(s)")
     return "Done: " + "; ".join(done)

@@ -99,11 +99,22 @@ class FakeDocs:
         units = p["text"].encode("utf-16-le")
         off = (index - a) * 2
         full = (units[:off].decode("utf-16-le") + text + units[off:].decode("utf-16-le"))
+        if "\n" not in text:  # links after the insertion point move right, like the real API
+            n, x = len(text.encode("utf-16-le")) // 2, index - a
+            p = dict(p, links=[(la + n * (la >= x), lb + n * (lb >= x), u) for la, lb, u in p.get("links", [])])
         lst[k:k + 1] = [dict(p, text=line) for line in full.split("\n")]
 
     def delete(self, a0, b0):
         """Delete within one list of paragraphs (one cell, in practice); keeps its last newline."""
         hit = [s for s in self.layout()[1] if s[0] < b0 and a0 < s[1]]
+        if len(hit) == 1 and b0 < hit[0][1]:  # inside one paragraph
+            a, _, lst, k = hit[0]
+            units = lst[k]["text"].encode("utf-16-le")
+            lst[k]["text"] = (units[:(a0 - a) * 2] + units[(b0 - a) * 2:]).decode("utf-16-le")
+            d, x0, x1 = b0 - a0, a0 - a, b0 - a  # links after the cut move left, like the real API
+            lst[k]["links"] = [(la - d * (la >= x1), lb - d * (lb >= x1), u)
+                               for la, lb, u in lst[k].get("links", []) if lb <= x0 or la >= x1]
+            return
         lst = hit[0][2]
         assert all(s[2] is lst for s in hit), "delete spans containers"
         base = next(s[0] for s in self.layout()[1] if s[2] is lst and s[3] == 0)
@@ -419,6 +430,21 @@ assert "linked 1 URL(s)" in out, out
 n = len(docs.calls)
 assert "linked" not in server.doc_edit("plan", replace={"Feed hens": "Feed the hens"})
 assert len(docs.calls) - n == 3  # GET, replace, GET: nothing left to link
+
+# [words](url) becomes the linked words; doc_read shows them back that way; replace matches them
+out = server.doc_edit("plan", insert="Walrus \U0001F4E7: [UNSUBSCRIBE](https://ex.com/u?a=1) or [EMAIL](https://mail.google.com/#all/1a2) https://bare.example",
+                      after="Run Notes")
+print(out)
+assert "linked 2 word(s)" in out and "linked 1 URL(s)" in out, out
+p = next(p for p in docs.paras if p.get("text", "").startswith("Walrus"))
+assert p["text"] == "Walrus \U0001F4E7: UNSUBSCRIBE or EMAIL https://bare.example", p["text"]
+got = sorted((p["text"].encode("utf-16-le")[a * 2:b * 2].decode("utf-16-le"), u) for a, b, u in p["links"])
+assert got == [("EMAIL", "https://mail.google.com/#all/1a2"), ("UNSUBSCRIBE", "https://ex.com/u?a=1"),
+               ("https://bare.example", "https://bare.example")], got
+shown = server.doc_read("plan", section="Run Notes")
+assert "Walrus \U0001F4E7: [UNSUBSCRIBE](https://ex.com/u?a=1) or [EMAIL](https://mail.google.com/#all/1a2) https://bare.example" in shown, shown
+out = server.doc_edit("plan", replace={"Walrus \U0001F4E7: [UNSUBSCRIBE](https://ex.com/u?a=1) or": "Walrus:"})
+assert "x1" in out, out
 
 assert server._col(0) == "A" and server._col(25) == "Z" and server._col(26) == "AA"
 assert server._q("Dan's list") == "'Dan''s list'"
